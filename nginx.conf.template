@@ -1,5 +1,5 @@
 server {
-    listen ${WEB_PORT};
+    listen ${PORT};
     server_name _;
     root /usr/share/nginx/html;
     index index.html;
@@ -8,6 +8,7 @@ server {
     gzip_types text/plain text/css application/javascript application/json;
     gzip_min_length 256;
 
+    # SPA：所有路由回退到 index.html（React Router / 客户端路由）
     location / {
         try_files $uri $uri/ /index.html;
     }
