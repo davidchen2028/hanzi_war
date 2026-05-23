@@ -1,56 +1,67 @@
 import type { Side } from "../types";
 
-/** 棋盘列/行（整体放大） */
 export const COLS = 9;
 export const ROWS = 12;
 
-/** 楚河汉界、主战场：中间 4 列 */
 export const PLAY_COL_MIN = 3;
 export const PLAY_COL_MAX = 6;
-export const PLAY_COLS = PLAY_COL_MAX - PLAY_COL_MIN + 1;
 
-/** 红方出兵区（含两侧黑色边距列） */
 export const DEPLOY_COL_MIN = 1;
 export const DEPLOY_COL_MAX = COLS - 2;
 
 export const CENTER_COL = 4;
 
-/** 大本营中心格 */
-export const RED_BASE = { col: CENTER_COL, row: 10 };
-export const BLUE_BASE = { col: CENTER_COL, row: 1 };
+/** 大本营块：3×3（上三下三 + 左右各一墙，中间大本营） */
+export const PALACE_COL_MIN = 3;
+export const PALACE_COL_MAX = 5;
 
-/** 大本营正门（可摧毁彩墙） */
-export const RED_BASE_GATE = { col: CENTER_COL, row: 9 };
-export const BLUE_BASE_GATE = { col: CENTER_COL, row: 2 };
+export const BLUE_PALACE_ROW_MIN = 1;
+export const BLUE_PALACE_ROW_MAX = 3;
+export const RED_PALACE_ROW_MIN = 8;
+export const RED_PALACE_ROW_MAX = 10;
 
-/** 楚河汉界：4 行 × 4 列 */
+export const BLUE_BASE = { col: CENTER_COL, row: 2 };
+export const RED_BASE = { col: CENTER_COL, row: 9 };
+
+export const BLUE_BASE_GATE = { col: CENTER_COL, row: BLUE_PALACE_ROW_MAX };
+export const RED_BASE_GATE = { col: CENTER_COL, row: RED_PALACE_ROW_MIN };
+
 export const RIVER_ROWS = [4, 5, 6, 7] as const;
 
-/** 红方可部署行 */
-export const RED_DEPLOY_MIN_ROW = 6;
-export const RED_DEPLOY_MAX_ROW = 9;
+/** 红方出兵：大本营所在 3 行（与宫殿同高，宫殿列内为墙/本营，两侧列可出兵） */
+export const RED_DEPLOY_MIN_ROW = RED_PALACE_ROW_MIN;
+export const RED_DEPLOY_MAX_ROW = RED_PALACE_ROW_MAX;
 
-/** 蓝方 AI 出兵行 */
-export const BLUE_SPAWN_ROW = 3;
+/** 蓝方 AI 出兵：对应宫殿 3 行 */
+export const BLUE_SPAWN_MIN_ROW = BLUE_PALACE_ROW_MIN;
+export const BLUE_SPAWN_MAX_ROW = BLUE_PALACE_ROW_MAX;
 
-/** 大本营围墙血量 */
 export const BASE_WALL_MAX_HP = 150;
 
-export const RED_BASE_WALL_CELLS = [
-  { col: 3, row: 9 },
-  { col: 4, row: 9 },
-  { col: 5, row: 9 },
-  { col: 3, row: 10 },
-  { col: 5, row: 10 },
-] as const;
+function compactPalaceWalls(r0: number, r1: number): { col: number; row: number }[] {
+  const c0 = PALACE_COL_MIN;
+  const c1 = PALACE_COL_MAX;
+  const cells: { col: number; row: number }[] = [];
+  for (let c = c0; c <= c1; c++) {
+    cells.push({ col: c, row: r0 });
+    cells.push({ col: c, row: r1 });
+  }
+  for (let r = r0 + 1; r < r1; r++) {
+    cells.push({ col: c0, row: r });
+    cells.push({ col: c1, row: r });
+  }
+  return cells;
+}
 
-export const BLUE_BASE_WALL_CELLS = [
-  { col: 3, row: 1 },
-  { col: 5, row: 1 },
-  { col: 3, row: 2 },
-  { col: 4, row: 2 },
-  { col: 5, row: 2 },
-] as const;
+export const BLUE_BASE_WALL_CELLS = compactPalaceWalls(
+  BLUE_PALACE_ROW_MIN,
+  BLUE_PALACE_ROW_MAX
+) as readonly { col: number; row: number }[];
+
+export const RED_BASE_WALL_CELLS = compactPalaceWalls(
+  RED_PALACE_ROW_MIN,
+  RED_PALACE_ROW_MAX
+) as readonly { col: number; row: number }[];
 
 const ALL_BASE_WALL_SET = new Set(
   [...RED_BASE_WALL_CELLS, ...BLUE_BASE_WALL_CELLS].map((c) => `${c.col},${c.row}`)
@@ -64,12 +75,10 @@ export function isDeployColumn(col: number): boolean {
   return col >= DEPLOY_COL_MIN && col <= DEPLOY_COL_MAX;
 }
 
-/** 棋盘内侧可通行列（外圈灰墙以外） */
 export function isInnerColumn(col: number): boolean {
   return isDeployColumn(col);
 }
 
-/** 棋盘外圈永久灰墙 */
 export function isBorderWall(col: number, row: number): boolean {
   if (col < 0 || col >= COLS || row < 0 || row >= ROWS) return true;
   if (isBaseWallPosition(col, row)) return false;
@@ -80,7 +89,6 @@ export function isBaseWallPosition(col: number, row: number): boolean {
   return ALL_BASE_WALL_SET.has(`${col},${row}`);
 }
 
-/** @deprecated */
 export function isWall(col: number, row: number): boolean {
   return isBorderWall(col, row);
 }
@@ -91,9 +99,10 @@ export function getBaseWallCells(side: Side): readonly { col: number; row: numbe
 }
 
 export function isBaseCell(col: number, row: number): boolean {
-  if (col === RED_BASE.col && row === RED_BASE.row) return true;
-  if (col === BLUE_BASE.col && row === BLUE_BASE.row) return true;
-  return false;
+  return (
+    (col === BLUE_BASE.col && row === BLUE_BASE.row) ||
+    (col === RED_BASE.col && row === RED_BASE.row)
+  );
 }
 
 export function isBaseGate(col: number, row: number): boolean {
@@ -103,12 +112,12 @@ export function isBaseGate(col: number, row: number): boolean {
   );
 }
 
-export function isRiverRow(row: number): boolean {
-  return (RIVER_ROWS as readonly number[]).includes(row);
+export function isPalaceInnerBlocked(_col: number, _row: number): boolean {
+  return false;
 }
 
-export function isRiverCell(col: number, row: number): boolean {
-  return isRiverRow(row) && isPlayColumn(col);
+export function isRiverRow(row: number): boolean {
+  return (RIVER_ROWS as readonly number[]).includes(row);
 }
 
 export function canAttackEnemyBase(

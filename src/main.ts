@@ -2,7 +2,7 @@ import Phaser from "phaser";
 import { GameScene } from "./scenes/GameScene";
 
 const GAME_WIDTH = 420;
-const GAME_HEIGHT = 920;
+const GAME_HEIGHT = 880;
 
 new Phaser.Game({
   type: Phaser.AUTO,
