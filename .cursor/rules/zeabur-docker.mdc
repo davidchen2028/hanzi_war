@@ -1,0 +1,29 @@
+---
+description: Zeabur / PaaS Docker 部署约定（端口、静态站）
+globs: Dockerfile, docker-entrypoint.sh, nginx.conf.template, **/Dockerfile*
+alwaysApply: false
+---
+
+# Zeabur Docker 编写约定
+
+## 端口（最重要）
+
+- Zeabur 在**运行时**注入 `WEB_PORT`，容器内进程必须监听该端口，**不要写死** 80/5173。
+- 兼容写法：`WEB_PORT="${WEB_PORT:-${PORT:-80}}"`，Nginx/Node 均监听此值。
+- `EXPOSE` 可写默认 80，但**实际 listen 必须用环境变量**。
+- 不要把 Vite dev 端口 5173 当作生产端口。
+
+## 静态站（Vite + Nginx）
+
+- 多阶段构建：`npm run build` → `dist` 复制到 Nginx。
+- 使用 `nginx.conf.template` + 启动脚本，将 `listen ${WEB_PORT};` 交给 envsubst。
+- `location /` 使用 `try_files ... /index.html` 以支持 SPA。
+
+## 禁止
+
+- 生产镜像内运行 `npm run dev`。
+- 仅 `EXPOSE 80` 而配置里写死 `listen 80` 且忽略 `WEB_PORT`。
+
+## 修改 Dockerfile 后
+
+提醒用户：`git add` → `commit` → `push`，由 Zeabur 自动重新构建；并在控制台将公网域名绑定到 **WEB_PORT 对应端口**。
