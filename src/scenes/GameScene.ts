@@ -32,7 +32,8 @@ import {
 import {
   UNIT_CONFIGS,
   DECK_IDS,
-  BASE_MAX_HP,
+  getBaseMaxHpForLevel,
+  BASE_HP_LEVEL_1,
   MAX_ENERGY,
   ENERGY_REGEN,
   CLOUD_ARROW_SUMMON,
@@ -45,6 +46,8 @@ import {
   CLOUD_ARROW_BLUE_WAVE2_CLEAR_DELAY_MS,
 } from "../config/units";
 import type { Side, UnitState, BaseWallState } from "../types";
+import { VictoryModal } from "../ui/victoryModal";
+import { playCloudArrowSfx } from "../audio/sfx";
 
 const CELL = 44;
 const BOARD_X = 12;
@@ -66,10 +69,13 @@ export class GameScene extends Phaser.Scene {
   private unitSprites = new Map<string, Phaser.GameObjects.Container>();
   private nextUnitId = 1;
 
+  private currentLevel = 1;
+  private baseMaxHp = getBaseMaxHpForLevel(1);
+
   private redEnergy = MAX_ENERGY;
   private blueEnergy = MAX_ENERGY;
-  private redBaseHp = BASE_MAX_HP;
-  private blueBaseHp = BASE_MAX_HP;
+  private redBaseHp = BASE_HP_LEVEL_1;
+  private blueBaseHp = BASE_HP_LEVEL_1;
 
   private draggingUnitId: string | null = null;
   private dragGhost: Phaser.GameObjects.Text | null = null;
@@ -97,6 +103,7 @@ export class GameScene extends Phaser.Scene {
   private nextCardText!: Phaser.GameObjects.Text;
   private dialogueBubble!: Phaser.GameObjects.Container;
   private resultText!: Phaser.GameObjects.Text;
+  private victoryModal: VictoryModal | null = null;
 
   private baseWalls: BaseWallState[] = [];
   private baseWallSprites = new Map<string, Phaser.GameObjects.Container>();
@@ -110,6 +117,12 @@ export class GameScene extends Phaser.Scene {
 
   constructor() {
     super({ key: "GameScene" });
+  }
+
+  init(data?: { level?: number }): void {
+    this.currentLevel = data?.level ?? 1;
+    this.baseMaxHp = getBaseMaxHpForLevel(this.currentLevel);
+    this.resetRoundState();
   }
 
   create(): void {
@@ -388,7 +401,7 @@ export class GameScene extends Phaser.Scene {
   private setBaseHpBarWidth(container: Phaser.GameObjects.Container, hp: number): void {
     const hpBar = container.getData("hpBar") as Phaser.GameObjects.Rectangle;
     const barW = container.getData("barW") as number;
-    const ratio = Math.max(0, hp / BASE_MAX_HP);
+    const ratio = Math.max(0, hp / this.baseMaxHp);
     hpBar.width = barW * ratio;
   }
 
@@ -402,6 +415,15 @@ export class GameScene extends Phaser.Scene {
   // ─── HUD ─────────────────────────────────────────────────
 
   private createHUD(): void {
+    this.add
+      .text(BOARD_X + COLS * CELL - 4, BOARD_Y - 6, `第 ${this.currentLevel} 关`, {
+        fontSize: "13px",
+        color: "#ccc",
+        fontFamily: "Noto Sans SC, sans-serif",
+      })
+      .setOrigin(1, 1)
+      .setDepth(HUD_DEPTH + 1);
+
     const skillX = BOARD_X;
     const skillY = HUD_Y;
 
@@ -1006,6 +1028,8 @@ export class GameScene extends Phaser.Scene {
   private fireCloudArrow(): void {
     if (!this.cloudArrowReady || this.gameOver) return;
 
+    playCloudArrowSfx();
+
     this.cloudArrowReady = false;
     this.updateSkillCooldownUI();
 
@@ -1450,10 +1474,20 @@ export class GameScene extends Phaser.Scene {
     this.hideEmptyFortQuote();
     this.emptyFortActive = false;
     this.boardZone.disableInteractive();
-    this.resultText.setText(msg).setVisible(true);
 
+    const won = msg.includes("胜利");
+    if (won) {
+      this.resultText.setVisible(false);
+      this.victoryModal = new VictoryModal(this, {
+        clearedLevel: this.currentLevel,
+        onHome: () => this.scene.start("HomeScene"),
+      });
+      return;
+    }
+
+    this.resultText.setText(msg).setVisible(true);
     this.add
-      .text(this.scale.width / 2, this.scale.height / 2 + 50, "点击刷新重来", {
+      .text(this.scale.width / 2, this.scale.height / 2 + 50, "点击重试本关", {
         fontSize: "14px",
         color: "#aaa",
         fontFamily: "Noto Sans SC, sans-serif",
@@ -1461,6 +1495,36 @@ export class GameScene extends Phaser.Scene {
       .setOrigin(0.5)
       .setDepth(150)
       .setInteractive({ useHandCursor: true })
-      .on("pointerdown", () => location.reload());
+      .on("pointerdown", () => {
+        this.scene.start("GameScene", { level: this.currentLevel });
+      });
+  }
+
+  private resetRoundState(): void {
+    this.victoryModal?.destroy();
+    this.victoryModal = null;
+    this.units = [];
+    this.unitSprites.clear();
+    this.nextUnitId = 1;
+    this.redBaseHp = this.baseMaxHp;
+    this.blueBaseHp = this.baseMaxHp;
+    this.redEnergy = MAX_ENERGY;
+    this.blueEnergy = MAX_ENERGY;
+    this.gameOver = false;
+    this.draggingUnitId = null;
+    this.dragGhost = null;
+    this.dragHoverRect = null;
+    this.deployHighlights = [];
+    this.cloudArrowReady = true;
+    this.cloudArrowBlueShieldIds.clear();
+    this.cloudArrowBlueWave1Complete = false;
+    this.cloudArrowBlueWave2Spawned = false;
+    this.emptyFortActive = false;
+    this.cloudArrowBlueWave2UnitIds.clear();
+    this.aiTimer = 0;
+    this.tutorialShown = false;
+    this.baseWalls = [];
+    this.baseWallSprites.clear();
+    this.nextWallId = 1;
   }
 }

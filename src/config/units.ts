@@ -102,6 +102,13 @@ export const EMPTY_FORT_QUOTE = "对方使用空城之计";
 /** 第二波全部生成完毕后，经过该时长清除第二波蓝方兵力 */
 export const CLOUD_ARROW_BLUE_WAVE2_CLEAR_DELAY_MS = 10000;
 
-export const BASE_MAX_HP = 1000;
+/** 第一关双方大本营血量 */
+export const BASE_HP_LEVEL_1 = 200;
+/** 第二关及之后双方大本营血量 */
+export const BASE_HP_DEFAULT = 60;
+
+export function getBaseMaxHpForLevel(level: number): number {
+  return level <= 1 ? BASE_HP_LEVEL_1 : BASE_HP_DEFAULT;
+}
 export const MAX_ENERGY = 25;
 export const ENERGY_REGEN = 4;
