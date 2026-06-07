@@ -77,6 +77,18 @@ export const UNIT_CONFIGS: Record<string, UnitConfig> = {
 
 export const DECK_IDS = ["bing", "zu", "dun", "wu"] as const;
 
+/** 角色页出战格子（8 格，仅手牌兵种；null 表示空位） */
+export const CHARACTER_ROSTER: (string | null)[] = [
+  "bing",
+  "zu",
+  "dun",
+  "wu",
+  null,
+  null,
+  null,
+  null,
+];
+
 /** 穿云箭召唤：军×7 马×7 卒×4 伍×3 盾×2 */
 export const CLOUD_ARROW_SUMMON: { id: string; count: number }[] = [
   { id: "jun", count: 7 },
@@ -99,16 +111,35 @@ export const CLOUD_ARROW_BLUE_WAVE2: { id: string; count: number }[] = [
   { id: "dun", count: 3 },
 ];
 export const EMPTY_FORT_QUOTE = "对方使用空城之计";
-/** 第二波全部生成完毕后，经过该时长清除第二波蓝方兵力 */
-export const CLOUD_ARROW_BLUE_WAVE2_CLEAR_DELAY_MS = 10000;
+/** 空城之计标语显示与停战持续时间（第一关、第二关均为 3 秒） */
+export const EMPTY_FORT_DURATION_MS = 3000;
+/** 第二关：空城之计结束后，再过该时长清除第二波蓝方兵力 */
+export const CLOUD_ARROW_BLUE_WAVE2_CLEAR_DELAY_LEVEL_2_MS = 20000;
+/** 第一关第二波清除延迟 */
+export const CLOUD_ARROW_BLUE_WAVE2_CLEAR_DELAY_LEVEL_1_MS = 10000;
 
-/** 第一关双方大本营血量 */
+/** 第一关大本营血量（双方） */
 export const BASE_HP_LEVEL_1 = 200;
-/** 第二关及之后双方大本营血量 */
-export const BASE_HP_DEFAULT = 60;
+/** 第二关起：蓝方大本营 = 第一关 + 该加成 */
+export const BASE_HP_BLUE_LEVEL_2_BONUS = 100;
 
-export function getBaseMaxHpForLevel(level: number): number {
-  return level <= 1 ? BASE_HP_LEVEL_1 : BASE_HP_DEFAULT;
+export function getRedBaseMaxHp(_level: number): number {
+  return BASE_HP_LEVEL_1;
+}
+
+export function getBlueBaseMaxHp(level: number): number {
+  if (level <= 1) return BASE_HP_LEVEL_1;
+  return BASE_HP_LEVEL_1 + BASE_HP_BLUE_LEVEL_2_BONUS;
+}
+
+export function getEmptyFortDurationMs(_level: number): number {
+  return EMPTY_FORT_DURATION_MS;
+}
+
+export function getCloudArrowBlueWave2ClearDelayMs(level: number): number {
+  return level >= 2
+    ? CLOUD_ARROW_BLUE_WAVE2_CLEAR_DELAY_LEVEL_2_MS
+    : CLOUD_ARROW_BLUE_WAVE2_CLEAR_DELAY_LEVEL_1_MS;
 }
 export const MAX_ENERGY = 25;
 export const ENERGY_REGEN = 4;

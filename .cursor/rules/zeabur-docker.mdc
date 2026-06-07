@@ -8,22 +8,22 @@ alwaysApply: false
 
 ## 端口（最重要）
 
-- Zeabur 在**运行时**注入 `WEB_PORT`，容器内进程必须监听该端口，**不要写死** 80/5173。
-- 兼容写法：`WEB_PORT="${WEB_PORT:-${PORT:-80}}"`，Nginx/Node 均监听此值。
-- `EXPOSE` 可写默认 80，但**实际 listen 必须用环境变量**。
+- Zeabur 在**运行时**注入 `PORT`，容器内进程必须监听该端口，**不要写死**到配置里（用模板 + envsubst）。
+- 兼容写法：`export PORT="${PORT:-8080}"`，Nginx `listen ${PORT};`。
+- `EXPOSE 8080` 仅作文档/默认；**实际 listen 以运行时 PORT 为准**。
 - 不要把 Vite dev 端口 5173 当作生产端口。
 
 ## 静态站（Vite + Nginx）
 
-- 多阶段构建：`npm run build` → `dist` 复制到 Nginx。
-- 使用 `nginx.conf.template` + 启动脚本，将 `listen ${WEB_PORT};` 交给 envsubst。
+- 多阶段构建：`npm run build` → `dist` 复制到 `/usr/share/nginx/html`。
+- 使用 `nginx.conf.template` + 官方 `docker-entrypoint.sh` 做 envsubst。
 - `location /` 使用 `try_files ... /index.html` 以支持 SPA。
 
 ## 禁止
 
 - 生产镜像内运行 `npm run dev`。
-- 仅 `EXPOSE 80` 而配置里写死 `listen 80` 且忽略 `WEB_PORT`。
+- 仅 `EXPOSE 8080` 而 `nginx.conf` 写死 `listen 8080` 且忽略 `PORT`。
 
 ## 修改 Dockerfile 后
 
-提醒用户：`git add` → `commit` → `push`，由 Zeabur 自动重新构建；并在控制台将公网域名绑定到 **WEB_PORT 对应端口**。
+提醒用户：`git add` → `commit` → `push`，由 Zeabur 自动重新构建；服务需监听平台分配的 **PORT**（常为 8080）。

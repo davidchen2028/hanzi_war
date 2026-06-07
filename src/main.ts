@@ -1,5 +1,6 @@
 import Phaser from "phaser";
 import { HomeScene } from "./scenes/HomeScene";
+import { CharacterScene } from "./scenes/CharacterScene";
 import { GameScene } from "./scenes/GameScene";
 
 const GAME_WIDTH = 420;
@@ -15,5 +16,5 @@ new Phaser.Game({
     mode: Phaser.Scale.FIT,
     autoCenter: Phaser.Scale.CENTER_BOTH,
   },
-  scene: [HomeScene, GameScene],
+  scene: [HomeScene, CharacterScene, GameScene],
 });

@@ -12,6 +12,9 @@ export class VictoryModal {
   private mask: Phaser.GameObjects.Rectangle;
 
   constructor(scene: Phaser.Scene, private options: VictoryModalOptions) {
+    // 通关即写入进度，避免未点「保存」时首页仍显示上一关
+    const saved = saveProgress(options.clearedLevel);
+
     const w = scene.scale.width;
     const h = scene.scale.height;
     const cx = w / 2;
@@ -54,9 +57,9 @@ export class VictoryModal {
       .setInteractive({ useHandCursor: true });
 
     this.saveBtnLabel = scene.add
-      .text(cx, cy + 28, "保存", {
+      .text(cx, cy + 28, saved ? "已保存" : "保存", {
         fontSize: "16px",
-        color: "#ffffff",
+        color: saved ? "#a5d6a7" : "#ffffff",
         fontFamily: "Noto Sans SC, sans-serif",
         fontStyle: "bold",
       })
@@ -78,7 +81,9 @@ export class VictoryModal {
       })
       .setOrigin(0.5);
 
-    homeBtnBg.on("pointerdown", () => options.onHome());
+    homeBtnBg.on("pointerdown", () => {
+      options.onHome();
+    });
 
     this.container.add([
       this.mask,

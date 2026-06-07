@@ -32,7 +32,10 @@ import {
 import {
   UNIT_CONFIGS,
   DECK_IDS,
-  getBaseMaxHpForLevel,
+  getRedBaseMaxHp,
+  getBlueBaseMaxHp,
+  getEmptyFortDurationMs,
+  getCloudArrowBlueWave2ClearDelayMs,
   BASE_HP_LEVEL_1,
   MAX_ENERGY,
   ENERGY_REGEN,
@@ -43,11 +46,11 @@ import {
   CLOUD_ARROW_BLUE_WAVE1,
   CLOUD_ARROW_BLUE_WAVE2,
   EMPTY_FORT_QUOTE,
-  CLOUD_ARROW_BLUE_WAVE2_CLEAR_DELAY_MS,
 } from "../config/units";
 import type { Side, UnitState, BaseWallState } from "../types";
 import { VictoryModal } from "../ui/victoryModal";
 import { playCloudArrowSfx } from "../audio/sfx";
+import { resetProgressToLevel1 } from "../services/saveService";
 
 const CELL = 44;
 const BOARD_X = 12;
@@ -70,7 +73,8 @@ export class GameScene extends Phaser.Scene {
   private nextUnitId = 1;
 
   private currentLevel = 1;
-  private baseMaxHp = getBaseMaxHpForLevel(1);
+  private redBaseMaxHp = BASE_HP_LEVEL_1;
+  private blueBaseMaxHp = BASE_HP_LEVEL_1;
 
   private redEnergy = MAX_ENERGY;
   private blueEnergy = MAX_ENERGY;
@@ -120,9 +124,22 @@ export class GameScene extends Phaser.Scene {
   }
 
   init(data?: { level?: number }): void {
-    this.currentLevel = data?.level ?? 1;
-    this.baseMaxHp = getBaseMaxHpForLevel(this.currentLevel);
+    this.currentLevel = Math.max(1, data?.level ?? 1);
+    this.redBaseMaxHp = getRedBaseMaxHp(this.currentLevel);
+    this.blueBaseMaxHp = getBlueBaseMaxHp(this.currentLevel);
     this.resetRoundState();
+  }
+
+  shutdown(): void {
+    this.cancelDragDeploy();
+    this.clearEmptyFortSafetyTimer();
+    this.clearCloudArrowBlueWave2Timer();
+    this.hideCloudArrowQuote();
+    this.hideEmptyFortQuote();
+    this.victoryModal?.destroy();
+    this.victoryModal = null;
+    this.cardContainers = [];
+    this.input.setTopOnly(false);
   }
 
   create(): void {
@@ -289,12 +306,15 @@ export class GameScene extends Phaser.Scene {
       })
       .setOrigin(0.5);
 
-    const underline = this.add.rectangle(0, 8, 22, 3, wall.side === "red" ? 0xe53935 : 0x1e88e5);
-    const hpBarBg = this.add.rectangle(0, 16, 24, 3, 0x333333);
-    const hpBar = this.add.rectangle(0, 16, 24, 3, wall.side === "red" ? 0xe53935 : 0x1e88e5);
+    const barW = 24;
+    const hpBarBg = this.add.rectangle(0, 12, barW, 3, 0x333333);
+    const hpBar = this.add
+      .rectangle(-barW / 2, 12, barW, 3, wall.side === "red" ? 0xe53935 : 0x1e88e5)
+      .setOrigin(0, 0.5);
 
-    container.add([charText, underline, hpBarBg, hpBar]);
+    container.add([charText, hpBarBg, hpBar]);
     container.setData("hpBar", hpBar);
+    container.setData("barW", barW);
     container.setData("maxHp", wall.maxHp);
 
     this.baseWallSprites.set(wall.id, container);
@@ -305,7 +325,8 @@ export class GameScene extends Phaser.Scene {
     if (!sprite) return;
     const hpBar = sprite.getData("hpBar") as Phaser.GameObjects.Rectangle;
     const ratio = Math.max(0, wall.hp / wall.maxHp);
-    hpBar.width = 24 * ratio;
+    const barW = sprite.getData("barW") as number ?? 24;
+    hpBar.width = barW * ratio;
   }
 
   private destroyBaseWall(wall: BaseWallState): void {
@@ -394,14 +415,18 @@ export class GameScene extends Phaser.Scene {
   }
 
   private updateBaseHpBars(): void {
-    this.setBaseHpBarWidth(this.redBaseContainer, this.redBaseHp);
-    this.setBaseHpBarWidth(this.blueBaseContainer, this.blueBaseHp);
+    this.setBaseHpBarWidth(this.redBaseContainer, this.redBaseHp, this.redBaseMaxHp);
+    this.setBaseHpBarWidth(this.blueBaseContainer, this.blueBaseHp, this.blueBaseMaxHp);
   }
 
-  private setBaseHpBarWidth(container: Phaser.GameObjects.Container, hp: number): void {
+  private setBaseHpBarWidth(
+    container: Phaser.GameObjects.Container,
+    hp: number,
+    maxHp: number
+  ): void {
     const hpBar = container.getData("hpBar") as Phaser.GameObjects.Rectangle;
     const barW = container.getData("barW") as number;
-    const ratio = Math.max(0, hp / this.baseMaxHp);
+    const ratio = Math.max(0, hp / maxHp);
     hpBar.width = barW * ratio;
   }
 
@@ -415,6 +440,8 @@ export class GameScene extends Phaser.Scene {
   // ─── HUD ─────────────────────────────────────────────────
 
   private createHUD(): void {
+    this.cardContainers = [];
+
     this.add
       .text(BOARD_X + COLS * CELL - 4, BOARD_Y - 6, `第 ${this.currentLevel} 关`, {
         fontSize: "13px",
@@ -1273,9 +1300,7 @@ export class GameScene extends Phaser.Scene {
     this.clearCloudArrowBlueWave2Timer();
 
     this.clearEmptyFortSafetyTimer();
-    const wave2Count = CLOUD_ARROW_BLUE_WAVE2.reduce((sum, g) => sum + g.count, 0);
-    const safetyMs = wave2Count * CLOUD_ARROW_SUMMON_DELAY_MS + 2500;
-    this.emptyFortSafetyTimer = this.time.delayedCall(safetyMs, () => {
+    this.emptyFortSafetyTimer = this.time.delayedCall(getEmptyFortDurationMs(this.currentLevel), () => {
       this.emptyFortSafetyTimer = null;
       if (this.emptyFortActive) {
         this.endEmptyFort();
@@ -1288,11 +1313,7 @@ export class GameScene extends Phaser.Scene {
       (_unitId, unit) => {
         this.cloudArrowBlueWave2UnitIds.add(unit.id);
       },
-      () => {
-        this.clearEmptyFortSafetyTimer();
-        this.endEmptyFort();
-        this.scheduleClearCloudArrowBlueWave2();
-      },
+      undefined,
       { includeRiverSlots: true }
     );
   }
@@ -1302,7 +1323,7 @@ export class GameScene extends Phaser.Scene {
     if (this.gameOver || this.cloudArrowBlueWave2UnitIds.size === 0) return;
 
     this.cloudArrowBlueWave2ClearTimer = this.time.delayedCall(
-      CLOUD_ARROW_BLUE_WAVE2_CLEAR_DELAY_MS,
+      getCloudArrowBlueWave2ClearDelayMs(this.currentLevel),
       () => {
         this.cloudArrowBlueWave2ClearTimer = null;
         this.clearCloudArrowBlueWave2Units();
@@ -1463,6 +1484,13 @@ export class GameScene extends Phaser.Scene {
     else if (this.redBaseHp <= 0) this.endGame("失败…");
   }
 
+  private goHome(): void {
+    this.victoryModal?.destroy();
+    this.victoryModal = null;
+    this.input.setTopOnly(false);
+    this.scene.start("HomeScene");
+  }
+
   private endGame(msg: string): void {
     if (this.gameOver) return;
     this.gameOver = true;
@@ -1480,34 +1508,33 @@ export class GameScene extends Phaser.Scene {
       this.resultText.setVisible(false);
       this.victoryModal = new VictoryModal(this, {
         clearedLevel: this.currentLevel,
-        onHome: () => this.scene.start("HomeScene"),
+        onHome: () => this.goHome(),
       });
       return;
     }
 
+    resetProgressToLevel1();
     this.resultText.setText(msg).setVisible(true);
-    this.add
-      .text(this.scale.width / 2, this.scale.height / 2 + 50, "点击重试本关", {
-        fontSize: "14px",
-        color: "#aaa",
-        fontFamily: "Noto Sans SC, sans-serif",
-      })
-      .setOrigin(0.5)
-      .setDepth(150)
-      .setInteractive({ useHandCursor: true })
-      .on("pointerdown", () => {
-        this.scene.start("GameScene", { level: this.currentLevel });
-      });
+    this.time.delayedCall(1200, () => {
+      if (this.scene.key !== "GameScene" || !this.gameOver) return;
+      this.goHome();
+    });
   }
 
   private resetRoundState(): void {
+    this.cancelDragDeploy();
+    this.clearEmptyFortSafetyTimer();
+    this.clearCloudArrowBlueWave2Timer();
+    this.hideCloudArrowQuote();
+    this.hideEmptyFortQuote();
     this.victoryModal?.destroy();
     this.victoryModal = null;
+    this.cardContainers = [];
     this.units = [];
     this.unitSprites.clear();
     this.nextUnitId = 1;
-    this.redBaseHp = this.baseMaxHp;
-    this.blueBaseHp = this.baseMaxHp;
+    this.redBaseHp = this.redBaseMaxHp;
+    this.blueBaseHp = this.blueBaseMaxHp;
     this.redEnergy = MAX_ENERGY;
     this.blueEnergy = MAX_ENERGY;
     this.gameOver = false;
