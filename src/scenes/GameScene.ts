@@ -6,6 +6,7 @@ import {
   BLUE_BASE,
   PALACE_COL_MIN,
   PALACE_COL_MAX,
+  CENTER_COL,
   BLUE_PALACE_ROW_MIN,
   BLUE_PALACE_ROW_MAX,
   RED_PALACE_ROW_MIN,
@@ -46,11 +47,24 @@ import {
   CLOUD_ARROW_BLUE_WAVE1,
   CLOUD_ARROW_BLUE_WAVE2,
   EMPTY_FORT_QUOTE,
+  BLUE_BASE_LOW_HP_TRIGGER_RATIO,
+  LEVEL_2_ENEMY_EMPTY_FORT_WAVE,
+  BURN_BOATS_QUOTE,
+  BURN_BOATS_ATTACK_MULTIPLIER,
+  BURN_BOATS_ENEMY_MULTIPLIER,
+  BURN_BOATS_DURATION_SEC,
+  BURN_BOATS_COOLDOWN_SEC,
+  GENERAL_MISS_STREAK_TRIGGER,
+  GENERAL_MISS_SUMMON_UNIT,
+  GENERAL_MISS_SUMMON_COUNT,
 } from "../config/units";
 import type { Side, UnitState, BaseWallState } from "../types";
 import { VictoryModal } from "../ui/victoryModal";
-import { playCloudArrowSfx } from "../audio/sfx";
+import { playBurnBoatsSfx, playCloudArrowSfx } from "../audio/sfx";
+import { isUnitUnlocked } from "../services/fragmentService";
+import { loadGeneral } from "../services/generalService";
 import { resetProgressToLevel1 } from "../services/saveService";
+import { bindSafeClick, deferInputAction, resetInputState } from "../utils/safeInput";
 
 const CELL = 44;
 const BOARD_X = 12;
@@ -58,6 +72,14 @@ const BOARD_Y = 16;
 const HUD_Y = BOARD_Y + ROWS * CELL + 14;
 const HUD_DEPTH = 200;
 const BOARD_DEPTH = 10;
+const SKILL_BTN_W = 60;
+const SKILL_BTN_H = 68;
+const SKILL_BTN_GAP = 8;
+/** 技能按钮中心 Y 相对 HUD_Y；进度条在按钮中心下方该偏移处 */
+const SKILL_BTN_CENTER_OFFSET_Y = 34;
+const SKILL_COOLDOWN_BAR_OFFSET_Y = 24;
+const SKILL_COOLDOWN_BAR_H = 6;
+const SKILL_COOLDOWN_BAR_W = 52;
 
 const COLORS = {
   red: 0xe53935,
@@ -86,6 +108,8 @@ export class GameScene extends Phaser.Scene {
   private dragHoverRect: Phaser.GameObjects.Rectangle | null = null;
   private deployHighlights: Phaser.GameObjects.Rectangle[] = [];
   private cloudArrowReady = true;
+  private burnBoatsCooldownSec = 0;
+  private burnBoatsActiveSec = 0;
   private cloudArrowQuoteContainer: Phaser.GameObjects.Container | null = null;
   private cloudArrowBlueShieldIds = new Set<string>();
   private cloudArrowBlueWave1Complete = false;
@@ -95,10 +119,18 @@ export class GameScene extends Phaser.Scene {
   private emptyFortSafetyTimer: Phaser.Time.TimerEvent | null = null;
   private cloudArrowBlueWave2UnitIds = new Set<string>();
   private cloudArrowBlueWave2ClearTimer: Phaser.Time.TimerEvent | null = null;
+  private enemyEmptyFortTriggered = false;
+  private generalMissStreak = new Map<string, number>();
   private skillCooldownGfx!: Phaser.GameObjects.Graphics;
   private skillBtnBg!: Phaser.GameObjects.Rectangle;
   private skillLabel!: Phaser.GameObjects.Text;
   private skillHit!: Phaser.GameObjects.Rectangle;
+  private generalSkillId: string | null = null;
+  private generalSkillCooldownSec = 0;
+  private generalSkillCooldownGfx: Phaser.GameObjects.Graphics | null = null;
+  private generalSkillBtnBg: Phaser.GameObjects.Rectangle | null = null;
+  private generalSkillLabel: Phaser.GameObjects.Text | null = null;
+  private generalSkillHit: Phaser.GameObjects.Rectangle | null = null;
   private boardZone!: Phaser.GameObjects.Zone;
 
   private energyText!: Phaser.GameObjects.Text;
@@ -139,7 +171,7 @@ export class GameScene extends Phaser.Scene {
     this.victoryModal?.destroy();
     this.victoryModal = null;
     this.cardContainers = [];
-    this.input.setTopOnly(false);
+    resetInputState(this);
   }
 
   create(): void {
@@ -152,6 +184,7 @@ export class GameScene extends Phaser.Scene {
     this.createHUD();
     this.createDialogue();
     this.createResultOverlay();
+    this.spawnDeployedGeneral();
 
     this.dialogueBubble.setDepth(HUD_DEPTH - 1);
 
@@ -173,9 +206,20 @@ export class GameScene extends Phaser.Scene {
 
     this.redEnergy = Math.min(MAX_ENERGY, this.redEnergy + ENERGY_REGEN * dt);
     this.blueEnergy = Math.min(MAX_ENERGY, this.blueEnergy + ENERGY_REGEN * dt);
+    if (this.currentLevel === 2) {
+      if (this.burnBoatsActiveSec > 0) {
+        this.burnBoatsActiveSec = Math.max(0, this.burnBoatsActiveSec - dt);
+      }
+      if (this.burnBoatsCooldownSec > 0) {
+        this.burnBoatsCooldownSec = Math.max(0, this.burnBoatsCooldownSec - dt);
+      }
+    }
+    if (this.generalSkillId && this.generalSkillCooldownSec > 0) {
+      this.generalSkillCooldownSec = Math.max(0, this.generalSkillCooldownSec - dt);
+    }
+
     this.updateEnergyUI();
     this.updateCardUI();
-
     this.updateSkillCooldownUI();
 
     if (!this.emptyFortActive) {
@@ -262,15 +306,21 @@ export class GameScene extends Phaser.Scene {
     this.drawPalaceLines(PALACE_COL_MIN, RED_PALACE_ROW_MIN, PALACE_COL_MAX, RED_PALACE_ROW_MAX);
   }
 
+  /** 宫殿 U 形示意线（与围墙布局一致，不再画斜线九宫） */
   private drawPalaceLines(c0: number, r0: number, c1: number, r1: number): void {
     const g = this.add.graphics();
-    g.lineStyle(1, 0x555555, 0.5);
+    g.lineStyle(1, 0x555555, 0.45);
     const x0 = BOARD_X + c0 * CELL;
     const y0 = BOARD_Y + r0 * CELL;
     const x1 = BOARD_X + (c1 + 1) * CELL;
     const y1 = BOARD_Y + (r1 + 1) * CELL;
-    g.lineBetween(x0, y0, x1, y1);
-    g.lineBetween(x1, y0, x0, y1);
+    const gateX = BOARD_X + CENTER_COL * CELL + CELL / 2;
+
+    g.lineBetween(x0, y0, x1, y0);
+    g.lineBetween(x0, y0, x0, y1);
+    g.lineBetween(x1, y0, x1, y1);
+    g.lineBetween(x0, y1, gateX - CELL / 2, y1);
+    g.lineBetween(gateX + CELL / 2, y1, x1, y1);
   }
 
   private createBaseWalls(): void {
@@ -417,6 +467,32 @@ export class GameScene extends Phaser.Scene {
   private updateBaseHpBars(): void {
     this.setBaseHpBarWidth(this.redBaseContainer, this.redBaseHp, this.redBaseMaxHp);
     this.setBaseHpBarWidth(this.blueBaseContainer, this.blueBaseHp, this.blueBaseMaxHp);
+    this.checkEnemyEmptyFort();
+  }
+
+  /** 第二关：敌方大本营血量低于 50% 时触发空城增援（与穿云箭空城之计同款流程，一场仅一次） */
+  private checkEnemyEmptyFort(): void {
+    if (
+      this.enemyEmptyFortTriggered ||
+      this.cloudArrowBlueWave2Spawned ||
+      this.gameOver ||
+      this.emptyFortActive ||
+      this.currentLevel !== 2 ||
+      this.blueBaseHp <= 0
+    ) {
+      return;
+    }
+    if (this.blueBaseHp / this.blueBaseMaxHp >= BLUE_BASE_LOW_HP_TRIGGER_RATIO) return;
+
+    this.enemyEmptyFortTriggered = true;
+    this.cloudArrowBlueWave2Spawned = true;
+    this.clearCloudArrowBlueWave2Timer();
+    this.beginEmptyFortReinforcement(
+      EMPTY_FORT_QUOTE,
+      LEVEL_2_ENEMY_EMPTY_FORT_WAVE,
+      this.cloudArrowBlueWave2UnitIds,
+      () => this.scheduleClearCloudArrowBlueWave2()
+    );
   }
 
   private setBaseHpBarWidth(
@@ -453,16 +529,19 @@ export class GameScene extends Phaser.Scene {
 
     const skillX = BOARD_X;
     const skillY = HUD_Y;
+    const useBurnBoats = this.currentLevel === 2;
+    const skillColor = useBurnBoats ? 0xe53935 : 0xff9800;
+    const skillTextColor = useBurnBoats ? "#e53935" : "#ff9800";
 
     this.skillBtnBg = this.add
       .rectangle(skillX + 30, skillY + 34, 60, 68, 0x333333)
-      .setStrokeStyle(2, 0xff9800)
+      .setStrokeStyle(2, skillColor)
       .setDepth(HUD_DEPTH);
 
     this.skillLabel = this.add
-      .text(skillX + 30, skillY + 22, "穿云箭", {
-        fontSize: "13px",
-        color: "#ff9800",
+      .text(skillX + 30, skillY + 22, useBurnBoats ? "破釜沉舟" : "穿云箭", {
+        fontSize: useBurnBoats ? "11px" : "13px",
+        color: skillTextColor,
         fontFamily: "Noto Sans SC, sans-serif",
       })
       .setOrigin(0.5)
@@ -475,7 +554,17 @@ export class GameScene extends Phaser.Scene {
       .setInteractive({ useHandCursor: true })
       .setDepth(HUD_DEPTH + 3);
 
-    this.skillHit.on("pointerdown", () => this.fireCloudArrow());
+    bindSafeClick(
+      this.skillHit,
+      this,
+      () => {
+        if (this.currentLevel === 2) this.fireBurnBoats();
+        else this.fireCloudArrow();
+      },
+      { hoverPoll: true }
+    );
+
+    this.createGeneralSkillButton(skillX, skillY);
 
     // 手牌
     const cardStartX = BOARD_X + 72;
@@ -509,31 +598,339 @@ export class GameScene extends Phaser.Scene {
     this.updateEnergyUI();
     this.updateCardUI();
     this.updateSkillCooldownUI();
-    this.updateSkillCooldownUI();
+  }
+
+  /** 左下：将领主动技（无将领则不显示） */
+  private createGeneralSkillButton(skillX: number, skillY: number): void {
+    const generalId = loadGeneral();
+    if (!generalId || !isUnitUnlocked(generalId)) return;
+
+    const cfg = UNIT_CONFIGS[generalId];
+    const skill = cfg?.activeSkill;
+    if (!cfg || !skill?.implemented) return;
+
+    this.generalSkillId = generalId;
+    const btnX = skillX + 30;
+    // 第三格：穿云箭下方第二格（与截图底部红框对齐）
+    const btnY = skillY + SKILL_BTN_CENTER_OFFSET_Y + (SKILL_BTN_H + SKILL_BTN_GAP) * 2;
+
+    this.generalSkillBtnBg = this.add
+      .rectangle(btnX, btnY, SKILL_BTN_W, SKILL_BTN_H, 0x333333)
+      .setStrokeStyle(2, 0xe53935)
+      .setDepth(HUD_DEPTH);
+
+    const label =
+      skill.name.length > 3 ? skill.name : `${skill.skillIcon ?? ""}${skill.name}`;
+    this.generalSkillLabel = this.add
+      .text(btnX, btnY - 2, label, {
+        fontSize: "11px",
+        color: "#e53935",
+        fontFamily: "Noto Sans SC, sans-serif",
+      })
+      .setOrigin(0.5)
+      .setDepth(HUD_DEPTH + 1);
+
+    this.generalSkillCooldownGfx = this.add.graphics().setDepth(HUD_DEPTH + 2);
+
+    this.generalSkillHit = this.add
+      .rectangle(btnX, btnY, SKILL_BTN_W, SKILL_BTN_H, 0x000000, 0.001)
+      .setInteractive({ useHandCursor: true })
+      .setDepth(HUD_DEPTH + 3);
+
+    bindSafeClick(this.generalSkillHit, this, () => this.fireGeneralSkill(), { hoverPoll: true });
+  }
+
+  private isBurnBoatsSkill(): boolean {
+    return this.currentLevel === 2;
+  }
+
+  private isBurnBoatsActive(): boolean {
+    return this.currentLevel === 2 && this.burnBoatsActiveSec > 0;
+  }
+
+  private getUnitAttack(unit: UnitState, baseAttack: number): number {
+    if (!this.isBurnBoatsActive()) return baseAttack;
+    if (unit.side === "red") {
+      return Math.round(baseAttack * BURN_BOATS_ATTACK_MULTIPLIER);
+    }
+    if (unit.side === "blue") {
+      return Math.max(1, Math.round(baseAttack * BURN_BOATS_ENEMY_MULTIPLIER));
+    }
+    return baseAttack;
+  }
+
+  private getUnitMoveSpeed(unit: UnitState, baseSpeed: number): number {
+    if (this.isBurnBoatsActive() && unit.side === "blue") {
+      return baseSpeed * BURN_BOATS_ENEMY_MULTIPLIER;
+    }
+    return baseSpeed;
+  }
+
+  private rollUnitStrike(
+    unit: UnitState,
+    baseAttack: number
+  ): { damage: number; missed: boolean; crit: boolean } {
+    const cfg = UNIT_CONFIGS[unit.configId];
+    const attack = this.getUnitAttack(unit, baseAttack);
+
+    if (cfg.missRate !== undefined && Math.random() < cfg.missRate) {
+      return { damage: 0, missed: true, crit: false };
+    }
+
+    let damage = attack;
+    let crit = false;
+    if (cfg.critRate !== undefined && Math.random() < cfg.critRate) {
+      damage = Math.round(attack * 2);
+      crit = true;
+    }
+    return { damage, missed: false, crit };
+  }
+
+  private onUnitAttackMiss(unit: UnitState): void {
+    const cfg = UNIT_CONFIGS[unit.configId];
+    if (cfg.kind !== "general") return;
+
+    const streak = (this.generalMissStreak.get(unit.id) ?? 0) + 1;
+    if (streak >= GENERAL_MISS_STREAK_TRIGGER) {
+      this.generalMissStreak.set(unit.id, 0);
+      this.summonJunAroundUnit(unit);
+      return;
+    }
+    this.generalMissStreak.set(unit.id, streak);
+  }
+
+  private onUnitAttackHit(unit: UnitState): void {
+    if (UNIT_CONFIGS[unit.configId].kind === "general") {
+      this.generalMissStreak.set(unit.id, 0);
+    }
+  }
+
+  private summonJunAroundUnit(center: UnitState): void {
+    const slots = this.collectSlotsAroundUnitOrdered(center, 1);
+    let spawned = 0;
+
+    for (const slot of slots) {
+      if (spawned >= GENERAL_MISS_SUMMON_COUNT) break;
+      if (!this.canEnterCell(slot.col, slot.row, "")) continue;
+      if (this.getUnitAt(slot.col, slot.row)) continue;
+      this.spawnUnit(center.side, GENERAL_MISS_SUMMON_UNIT, slot.col, slot.row);
+      spawned++;
+    }
+
+    if (spawned > 0) {
+      const x = BOARD_X + center.col * CELL + CELL / 2;
+      const y = BOARD_Y + center.row * CELL + CELL / 2;
+      this.showFloatText(x, y - 20, `未中${GENERAL_MISS_STREAK_TRIGGER}次·军援×${spawned}`);
+    }
+  }
+
+  private collectSlotsAroundUnitOrdered(
+    unit: UnitState,
+    radius: number
+  ): { col: number; row: number }[] {
+    const slots: { col: number; row: number }[] = [];
+    for (let dr = -radius; dr <= radius; dr++) {
+      for (let dc = -radius; dc <= radius; dc++) {
+        if (dc === 0 && dr === 0) continue;
+        slots.push({ col: unit.col + dc, row: unit.row + dr });
+      }
+    }
+    slots.sort((a, b) => {
+      const da = Math.abs(a.col - unit.col) + Math.abs(a.row - unit.row);
+      const db = Math.abs(b.col - unit.col) + Math.abs(b.row - unit.row);
+      return da - db;
+    });
+    return slots;
+  }
+
+  private showFloatText(x: number, y: number, msg: string): void {
+    const text = this.add
+      .text(x, y, msg, {
+        fontSize: "13px",
+        color: "#ffeb3b",
+        fontFamily: "Noto Sans SC, sans-serif",
+        fontStyle: "bold",
+        stroke: "#000000",
+        strokeThickness: 3,
+      })
+      .setOrigin(0.5)
+      .setDepth(BOARD_DEPTH + 80);
+    this.tweens.add({
+      targets: text,
+      y: y - 28,
+      alpha: 0,
+      duration: 1000,
+      onComplete: () => text.destroy(),
+    });
+  }
+
+  private flashMiss(unit: UnitState): void {
+    const sprite = this.unitSprites.get(unit.id);
+    if (!sprite) return;
+    const x = sprite.x;
+    const y = sprite.y - 22;
+    this.showFloatText(x, y, "未中");
+    this.tweens.add({
+      targets: sprite,
+      alpha: 0.45,
+      duration: 80,
+      yoyo: true,
+    });
+  }
+
+  private flashCrit(target: UnitState): void {
+    const sprite = this.unitSprites.get(target.id);
+    if (!sprite) return;
+    this.tweens.add({
+      targets: sprite,
+      scaleX: 1.15,
+      scaleY: 1.15,
+      duration: 80,
+      yoyo: true,
+    });
+  }
+
+  private spawnDeployedGeneral(): void {
+    const generalId = loadGeneral();
+    if (!generalId || !isUnitUnlocked(generalId) || !UNIT_CONFIGS[generalId]) return;
+
+    const slot = this.findGeneralSpawnSlot();
+    if (!slot) return;
+    this.spawnUnit("red", generalId, slot.col, slot.row);
+  }
+
+  private findGeneralSpawnSlot(): { col: number; row: number } | null {
+    const preferred = [
+      { col: 4, row: RED_DEPLOY_MAX_ROW },
+      { col: 3, row: RED_DEPLOY_MAX_ROW },
+      { col: 5, row: RED_DEPLOY_MAX_ROW },
+      { col: 4, row: RED_DEPLOY_MAX_ROW - 1 },
+    ];
+    for (const slot of preferred) {
+      if (!this.isCellBlocked(slot.col, slot.row) && !this.getUnitAt(slot.col, slot.row)) {
+        return slot;
+      }
+    }
+    for (let row = RED_DEPLOY_MAX_ROW; row >= RED_DEPLOY_MIN_ROW; row--) {
+      for (let col = DEPLOY_COL_MIN; col <= DEPLOY_COL_MAX; col++) {
+        if (!this.isCellBlocked(col, row) && !this.getUnitAt(col, row)) {
+          return { col, row };
+        }
+      }
+    }
+    return null;
   }
 
   private updateSkillCooldownUI(): void {
     const x = BOARD_X + 4;
-    const y = HUD_Y + 58;
-    const w = 52;
-    const h = 6;
+    const y = HUD_Y + SKILL_BTN_CENTER_OFFSET_Y + SKILL_COOLDOWN_BAR_OFFSET_Y;
+    const w = SKILL_COOLDOWN_BAR_W;
+    const h = SKILL_COOLDOWN_BAR_H;
 
     this.skillCooldownGfx.clear();
     this.skillCooldownGfx.fillStyle(0x222222, 1);
     this.skillCooldownGfx.fillRect(x, y, w, h);
 
-    if (this.cloudArrowReady && !this.gameOver) {
+    if (this.isBurnBoatsSkill()) {
+      const ready = this.burnBoatsCooldownSec <= 0 && !this.gameOver;
+      const fillRatio = ready
+        ? 1
+        : 1 - this.burnBoatsCooldownSec / BURN_BOATS_COOLDOWN_SEC;
+      const barColor = this.burnBoatsActiveSec > 0 ? 0xff5252 : 0xe53935;
+      this.skillCooldownGfx.fillStyle(barColor, 1);
+      this.skillCooldownGfx.fillRect(x, y, w * fillRatio, h);
+      this.skillBtnBg.setAlpha(ready ? 1 : 0.4);
+      this.skillLabel.setColor(
+        ready ? (this.burnBoatsActiveSec > 0 ? "#ff5252" : "#e53935") : "#666666"
+      );
+      if (ready) this.skillHit.setInteractive({ useHandCursor: true });
+      else this.skillHit.disableInteractive();
+    } else if (this.cloudArrowReady && !this.gameOver) {
       this.skillCooldownGfx.fillStyle(0xff9800, 1);
       this.skillCooldownGfx.fillRect(x, y, w, h);
       this.skillBtnBg.setAlpha(1);
       this.skillLabel.setColor("#ff9800");
       this.skillHit.setInteractive({ useHandCursor: true });
-      return;
+    } else {
+      this.skillBtnBg.setAlpha(0.4);
+      this.skillLabel.setColor("#666666");
+      this.skillHit.disableInteractive();
     }
 
-    this.skillBtnBg.setAlpha(0.4);
-    this.skillLabel.setColor("#666666");
-    this.skillHit.disableInteractive();
+    // 将领技进度条须每帧刷新，不可因穿云箭/破釜沉舟就绪而跳过
+    this.updateGeneralSkillCooldownUI();
+  }
+
+  private updateGeneralSkillCooldownUI(): void {
+    if (!this.generalSkillId || !this.generalSkillCooldownGfx || !this.generalSkillBtnBg) return;
+
+    const skill = UNIT_CONFIGS[this.generalSkillId]?.activeSkill;
+    if (!skill) return;
+
+    const generalBtnY =
+      HUD_Y + SKILL_BTN_CENTER_OFFSET_Y + (SKILL_BTN_H + SKILL_BTN_GAP) * 2;
+    const x = BOARD_X + 4;
+    const y = generalBtnY + SKILL_COOLDOWN_BAR_OFFSET_Y;
+    const w = SKILL_COOLDOWN_BAR_W;
+    const h = SKILL_COOLDOWN_BAR_H;
+
+    this.generalSkillCooldownGfx.clear();
+    this.generalSkillCooldownGfx.fillStyle(0x222222, 1);
+    this.generalSkillCooldownGfx.fillRect(x, y, w, h);
+
+    const general = this.findGeneralUnit();
+    const ready =
+      this.generalSkillCooldownSec <= 0 &&
+      !this.gameOver &&
+      !!general &&
+      !!this.findNearestEnemy(general);
+    const fillRatio = ready
+      ? 1
+      : 1 - this.generalSkillCooldownSec / skill.cooldownSec;
+
+    this.generalSkillCooldownGfx.fillStyle(0xe53935, 1);
+    this.generalSkillCooldownGfx.fillRect(x, y, w * fillRatio, h);
+
+    this.generalSkillBtnBg.setAlpha(ready ? 1 : 0.4);
+    this.generalSkillLabel?.setColor(ready ? "#e53935" : "#666666");
+
+    if (ready) this.generalSkillHit?.setInteractive({ useHandCursor: true });
+    else this.generalSkillHit?.disableInteractive();
+  }
+
+  private findGeneralUnit(): UnitState | undefined {
+    if (!this.generalSkillId) return undefined;
+    return this.units.find(
+      (u) => u.hp > 0 && u.side === "red" && u.configId === this.generalSkillId
+    );
+  }
+
+  private findNearestEnemy(from: UnitState): UnitState | undefined {
+    const enemies = this.getEnemyUnits(from.side);
+    let nearest: UnitState | undefined;
+    let minDist = Infinity;
+    for (const enemy of enemies) {
+      const d = this.manhattan(from, enemy.col, enemy.row);
+      if (d < minDist) {
+        minDist = d;
+        nearest = enemy;
+      }
+    }
+    return nearest;
+  }
+
+  private getEnemiesInSquare(
+    centerCol: number,
+    centerRow: number,
+    size: number,
+    side: Side
+  ): UnitState[] {
+    const half = Math.floor(size / 2);
+    return this.getEnemyUnits(side).filter((u) => {
+      const dc = Math.abs(u.col - centerCol);
+      const dr = Math.abs(u.row - centerRow);
+      return dc <= half && dr <= half;
+    });
   }
 
   private createCard(
@@ -933,10 +1330,18 @@ export class GameScene extends Phaser.Scene {
       if (target) {
         unit.wallTargetId = null;
         if (unit.attackTimer <= 0) {
-          target.hp -= cfg.attack;
+          const strike = this.rollUnitStrike(unit, cfg.attack);
           unit.attackTimer = cfg.attackInterval;
-          this.flashDamage(target);
-          if (target.hp <= 0) this.killUnit(target);
+          if (strike.missed) {
+            this.onUnitAttackMiss(unit);
+            this.flashMiss(unit);
+          } else {
+            this.onUnitAttackHit(unit);
+            target.hp -= strike.damage;
+            this.flashDamage(target);
+            if (strike.crit) this.flashCrit(target);
+            if (target.hp <= 0) this.killUnit(target);
+          }
         }
         this.updateUnitHpBar(unit);
         continue;
@@ -957,36 +1362,58 @@ export class GameScene extends Phaser.Scene {
 
       if (wallTarget) {
         if (unit.attackTimer <= 0) {
-          wallTarget.hp -= cfg.attack;
+          const strike = this.rollUnitStrike(unit, cfg.attack);
           unit.attackTimer = cfg.attackInterval;
-          this.flashBaseWall(wallTarget);
-          this.updateBaseWallHpBar(wallTarget);
-          if (wallTarget.hp <= 0) this.destroyBaseWall(wallTarget);
+          if (strike.missed) {
+            this.onUnitAttackMiss(unit);
+            this.flashMiss(unit);
+          } else {
+            this.onUnitAttackHit(unit);
+            wallTarget.hp -= strike.damage;
+            this.flashBaseWall(wallTarget);
+            this.updateBaseWallHpBar(wallTarget);
+            if (wallTarget.hp <= 0) this.destroyBaseWall(wallTarget);
+          }
         }
         this.updateUnitHpBar(unit);
         continue;
       }
 
       // 攻击大本营（必须站在门口格）
-      if (canAttackEnemyBase(unit.col, unit.row, unit.side, (c, r) => this.gateWallIntact(c, r))) {
+      if (
+        canAttackEnemyBase(
+          unit.col,
+          unit.row,
+          unit.side,
+          cfg.attackRange,
+          (c, r) => this.gateWallIntact(c, r)
+        )
+      ) {
         if (unit.attackTimer <= 0) {
-          if (unit.side === "red") {
-            this.blueBaseHp -= cfg.attack;
-            this.flashBase("blue");
-            this.updateBaseHpBars();
-          } else {
-            this.redBaseHp -= cfg.attack;
-            this.flashBase("red");
-            this.updateBaseHpBars();
-          }
+          const strike = this.rollUnitStrike(unit, cfg.attack);
           unit.attackTimer = cfg.attackInterval;
+          if (strike.missed) {
+            this.onUnitAttackMiss(unit);
+            this.flashMiss(unit);
+          } else {
+            this.onUnitAttackHit(unit);
+            if (unit.side === "red") {
+              this.blueBaseHp -= strike.damage;
+              this.flashBase("blue");
+              this.updateBaseHpBars();
+            } else {
+              this.redBaseHp -= strike.damage;
+              this.flashBase("red");
+              this.updateBaseHpBars();
+            }
+          }
         }
         continue;
       }
 
       // 移动：moveSpeed = 每秒前进的格数
       unit.moveTimer += dt;
-      const stepInterval = 1 / cfg.moveSpeed;
+      const stepInterval = 1 / this.getUnitMoveSpeed(unit, cfg.moveSpeed);
       if (unit.moveTimer < stepInterval) {
         this.updateUnitHpBar(unit);
         continue;
@@ -1052,6 +1479,105 @@ export class GameScene extends Phaser.Scene {
 
   // ─── Skills ──────────────────────────────────────────────
 
+  private fireGeneralSkill(): void {
+    if (!this.generalSkillId || this.generalSkillCooldownSec > 0 || this.gameOver) return;
+
+    const general = this.findGeneralUnit();
+    const cfg = UNIT_CONFIGS[this.generalSkillId];
+    const skill = cfg?.activeSkill;
+    if (!general || !skill) return;
+
+    const primaryTarget = this.findNearestEnemy(general);
+    if (!primaryTarget) {
+      const gx = BOARD_X + general.col * CELL + CELL / 2;
+      const gy = BOARD_Y + general.row * CELL + CELL / 2;
+      this.showFloatText(gx, gy - 28, "无敌人");
+      return;
+    }
+
+    this.generalSkillCooldownSec = skill.cooldownSec;
+    this.updateSkillCooldownUI();
+
+    const quote = skill.skillIcon ? `${skill.skillIcon} ${skill.name}` : skill.name;
+    this.showSkillQuote(quote, { holder: "cloudArrow" });
+    playCloudArrowSfx();
+
+    this.spawnFingerVfx(general.col, general.row, primaryTarget.col, primaryTarget.row);
+
+    for (const enemy of this.getEnemiesInSquare(
+      primaryTarget.col,
+      primaryTarget.row,
+      skill.areaSize,
+      general.side
+    )) {
+      const doubleChance =
+        skill.doubleChanceMin +
+        Math.random() * (skill.doubleChanceMax - skill.doubleChanceMin);
+      const doubled = Math.random() < doubleChance;
+      const damage = doubled ? skill.baseDamage * 2 : skill.baseDamage;
+      enemy.hp -= damage;
+      this.flashDamage(enemy);
+      if (doubled) this.flashCrit(enemy);
+      if (enemy.hp <= 0) this.killUnit(enemy);
+    }
+
+    const tx = BOARD_X + primaryTarget.col * CELL + CELL / 2;
+    const ty = BOARD_Y + primaryTarget.row * CELL + CELL / 2;
+    this.tweens.add({
+      targets: this.unitSprites.get(general.id),
+      scaleX: 1.1,
+      scaleY: 1.1,
+      duration: 120,
+      yoyo: true,
+    });
+    this.showFloatText(tx, ty - 28, skill.name);
+  }
+
+  private spawnFingerVfx(fromCol: number, fromRow: number, toCol: number, toRow: number): void {
+    const x0 = BOARD_X + fromCol * CELL + CELL / 2;
+    const y0 = BOARD_Y + fromRow * CELL + CELL / 2;
+    const x1 = BOARD_X + toCol * CELL + CELL / 2;
+    const y1 = BOARD_Y + toRow * CELL + CELL / 2;
+    const finger = this.add
+      .text(x0, y0, "👆", { fontSize: "22px" })
+      .setOrigin(0.5)
+      .setDepth(BOARD_DEPTH + 60);
+    this.tweens.add({
+      targets: finger,
+      x: x1,
+      y: y1,
+      duration: 180,
+      onComplete: () => finger.destroy(),
+    });
+  }
+
+  private fireBurnBoats(): void {
+    if (this.burnBoatsCooldownSec > 0 || this.gameOver) return;
+
+    playBurnBoatsSfx();
+    this.burnBoatsCooldownSec = BURN_BOATS_COOLDOWN_SEC;
+    this.burnBoatsActiveSec = BURN_BOATS_DURATION_SEC;
+    this.updateSkillCooldownUI();
+    this.showSkillQuote(BURN_BOATS_QUOTE, { holder: "cloudArrow" });
+    this.playBurnBoatsVfx();
+  }
+
+  private playBurnBoatsVfx(): void {
+    const reds = this.units.filter((u) => u.hp > 0 && u.side === "red");
+    for (const unit of reds) {
+      const sprite = this.unitSprites.get(unit.id);
+      if (!sprite) continue;
+      this.tweens.add({
+        targets: sprite,
+        scaleX: 1.12,
+        scaleY: 1.12,
+        duration: 180,
+        yoyo: true,
+        ease: "Sine.easeOut",
+      });
+    }
+  }
+
   private fireCloudArrow(): void {
     if (!this.cloudArrowReady || this.gameOver) return;
 
@@ -1067,7 +1593,16 @@ export class GameScene extends Phaser.Scene {
   }
 
   private showCloudArrowQuote(): void {
-    this.hideCloudArrowQuote();
+    this.showSkillQuote(CLOUD_ARROW_QUOTE, { holder: "cloudArrow" });
+  }
+
+  /** 穿云箭 / 空城：屏幕中央亮黄荧光标语 */
+  private showSkillQuote(
+    quote: string,
+    options: { holder: "cloudArrow" | "emptyFort" }
+  ): void {
+    if (options.holder === "cloudArrow") this.hideCloudArrowQuote();
+    else this.hideEmptyFortQuote();
 
     const cx = this.scale.width / 2;
     const cy = this.scale.height / 2;
@@ -1075,7 +1610,7 @@ export class GameScene extends Phaser.Scene {
 
     const wrap = { width: 360 };
     const glow = this.add
-      .text(0, 0, CLOUD_ARROW_QUOTE, {
+      .text(0, 0, quote, {
         fontSize: "26px",
         fontFamily: "Noto Sans SC, sans-serif",
         fontStyle: "bold",
@@ -1089,7 +1624,7 @@ export class GameScene extends Phaser.Scene {
       .setAlpha(0.55);
 
     const main = this.add
-      .text(0, 0, CLOUD_ARROW_QUOTE, {
+      .text(0, 0, quote, {
         fontSize: "26px",
         fontFamily: "Noto Sans SC, sans-serif",
         fontStyle: "bold",
@@ -1121,8 +1656,12 @@ export class GameScene extends Phaser.Scene {
       ease: "Sine.easeInOut",
     });
 
-    this.cloudArrowQuoteContainer = container;
-    this.time.delayedCall(CLOUD_ARROW_QUOTE_DURATION_MS, () => this.hideCloudArrowQuote());
+    if (options.holder === "cloudArrow") {
+      this.cloudArrowQuoteContainer = container;
+      this.time.delayedCall(CLOUD_ARROW_QUOTE_DURATION_MS, () => this.hideCloudArrowQuote());
+    } else {
+      this.emptyFortQuoteContainer = container;
+    }
   }
 
   private hideCloudArrowQuote(): void {
@@ -1286,35 +1825,51 @@ export class GameScene extends Phaser.Scene {
     this.beginEmptyFortAndWave2();
   }
 
-  /** 六盾全灭：红方撤退、空城之计文案，暂停战斗直至蓝方第二波出完 */
-  private beginEmptyFortAndWave2(): void {
-    if (this.cloudArrowBlueWave2Spawned || this.gameOver) return;
-    this.cloudArrowBlueWave2Spawned = true;
+  /** 空城增援：与穿云箭同款标语/音效/停战/撤退/出兵/清场 */
+  private beginEmptyFortReinforcement(
+    quote: string,
+    wave: { id: string; count: number }[],
+    waveUnitIds: Set<string>,
+    onAfterPause: () => void
+  ): void {
+    if (this.emptyFortActive || this.gameOver) return;
+
     this.emptyFortActive = true;
     this.cancelDragDeploy();
-
     this.retreatAllRedUnits();
-    this.showEmptyFortQuote();
 
-    this.cloudArrowBlueWave2UnitIds.clear();
-    this.clearCloudArrowBlueWave2Timer();
+    playCloudArrowSfx();
+    this.playCloudArrowVfx();
+    this.showSkillQuote(quote, { holder: "emptyFort" });
 
+    waveUnitIds.clear();
     this.clearEmptyFortSafetyTimer();
     this.emptyFortSafetyTimer = this.time.delayedCall(getEmptyFortDurationMs(this.currentLevel), () => {
       this.emptyFortSafetyTimer = null;
       if (this.emptyFortActive) {
         this.endEmptyFort();
-        this.scheduleClearCloudArrowBlueWave2();
+        onAfterPause();
       }
     });
 
     this.spawnBlueUnitsStaggered(
-      CLOUD_ARROW_BLUE_WAVE2,
-      (_unitId, unit) => {
-        this.cloudArrowBlueWave2UnitIds.add(unit.id);
-      },
+      wave,
+      (_unitId, unit) => waveUnitIds.add(unit.id),
       undefined,
       { includeRiverSlots: true }
+    );
+  }
+
+  /** 六盾全灭：触发穿云箭反击空城第二波 */
+  private beginEmptyFortAndWave2(): void {
+    if (this.cloudArrowBlueWave2Spawned || this.gameOver) return;
+    this.cloudArrowBlueWave2Spawned = true;
+    this.clearCloudArrowBlueWave2Timer();
+    this.beginEmptyFortReinforcement(
+      EMPTY_FORT_QUOTE,
+      CLOUD_ARROW_BLUE_WAVE2,
+      this.cloudArrowBlueWave2UnitIds,
+      () => this.scheduleClearCloudArrowBlueWave2()
     );
   }
 
@@ -1365,64 +1920,6 @@ export class GameScene extends Phaser.Scene {
       }
       this.tweenUnitToGrid(unit, 600);
     }
-  }
-
-  private showEmptyFortQuote(): void {
-    this.hideEmptyFortQuote();
-
-    const cx = this.scale.width / 2;
-    const cy = this.scale.height / 2;
-    const container = this.add.container(cx, cy).setDepth(500);
-
-    const wrap = { width: 340 };
-    const glow = this.add
-      .text(0, 0, EMPTY_FORT_QUOTE, {
-        fontSize: "28px",
-        fontFamily: "Noto Sans SC, sans-serif",
-        fontStyle: "bold",
-        color: "#90CAF9",
-        align: "center",
-        stroke: "#42A5F5",
-        strokeThickness: 12,
-        wordWrap: wrap,
-      })
-      .setOrigin(0.5)
-      .setAlpha(0.55);
-
-    const main = this.add
-      .text(0, 0, EMPTY_FORT_QUOTE, {
-        fontSize: "28px",
-        fontFamily: "Noto Sans SC, sans-serif",
-        fontStyle: "bold",
-        color: "#E3F2FD",
-        align: "center",
-        stroke: "#1E88E5",
-        strokeThickness: 2,
-        shadow: {
-          offsetX: 0,
-          offsetY: 0,
-          color: "#64B5F6",
-          blur: 20,
-          stroke: true,
-          fill: true,
-        },
-        wordWrap: wrap,
-      })
-      .setOrigin(0.5);
-
-    container.add([glow, main]);
-
-    this.tweens.add({
-      targets: container,
-      scale: { from: 0.97, to: 1.05 },
-      alpha: { from: 0.88, to: 1 },
-      duration: 450,
-      yoyo: true,
-      repeat: -1,
-      ease: "Sine.easeInOut",
-    });
-
-    this.emptyFortQuoteContainer = container;
   }
 
   private hideEmptyFortQuote(): void {
@@ -1485,10 +1982,16 @@ export class GameScene extends Phaser.Scene {
   }
 
   private goHome(): void {
-    this.victoryModal?.destroy();
-    this.victoryModal = null;
-    this.input.setTopOnly(false);
-    this.scene.start("HomeScene");
+    deferInputAction(this, () => {
+      if (this.scene.key !== "GameScene") return;
+      this.victoryModal?.destroy();
+      this.victoryModal = null;
+      this.boardZone?.disableInteractive();
+      this.skillHit?.disableInteractive();
+      this.generalSkillHit?.disableInteractive();
+      resetInputState(this);
+      this.scene.start("HomeScene");
+    });
   }
 
   private endGame(msg: string): void {
@@ -1502,6 +2005,7 @@ export class GameScene extends Phaser.Scene {
     this.hideEmptyFortQuote();
     this.emptyFortActive = false;
     this.boardZone.disableInteractive();
+    this.generalSkillHit?.disableInteractive();
 
     const won = msg.includes("胜利");
     if (won) {
@@ -1535,6 +2039,7 @@ export class GameScene extends Phaser.Scene {
     this.nextUnitId = 1;
     this.redBaseHp = this.redBaseMaxHp;
     this.blueBaseHp = this.blueBaseMaxHp;
+    this.enemyEmptyFortTriggered = false;
     this.redEnergy = MAX_ENERGY;
     this.blueEnergy = MAX_ENERGY;
     this.gameOver = false;
@@ -1543,11 +2048,20 @@ export class GameScene extends Phaser.Scene {
     this.dragHoverRect = null;
     this.deployHighlights = [];
     this.cloudArrowReady = true;
+    this.burnBoatsCooldownSec = 0;
+    this.burnBoatsActiveSec = 0;
+    this.generalSkillId = null;
+    this.generalSkillCooldownSec = 0;
+    this.generalSkillBtnBg = null;
+    this.generalSkillLabel = null;
+    this.generalSkillHit = null;
+    this.generalSkillCooldownGfx = null;
     this.cloudArrowBlueShieldIds.clear();
     this.cloudArrowBlueWave1Complete = false;
     this.cloudArrowBlueWave2Spawned = false;
     this.emptyFortActive = false;
     this.cloudArrowBlueWave2UnitIds.clear();
+    this.generalMissStreak.clear();
     this.aiTimer = 0;
     this.tutorialShown = false;
     this.baseWalls = [];

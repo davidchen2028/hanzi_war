@@ -1,3 +1,7 @@
+import { resetFragments } from "./fragmentService";
+import { resetGeneral } from "./generalService";
+import { resetRoster } from "./rosterService";
+
 const STORAGE_KEY = "hanzi-gongfangzhan:save";
 const SAVE_VERSION = 1;
 
@@ -27,6 +31,16 @@ export function loadSave(): GameSave {
   } catch {
     return defaultSave();
   }
+}
+
+/** 清除全部本地存档：关卡进度、碎片、出战小兵选配、出战将领 */
+export function clearAllSave(): boolean {
+  return (
+    resetProgressToLevel1() &&
+    resetRoster() &&
+    resetFragments() &&
+    resetGeneral()
+  );
 }
 
 /** 将进度重置为第一关 */

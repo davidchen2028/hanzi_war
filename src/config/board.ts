@@ -11,7 +11,7 @@ export const DEPLOY_COL_MAX = COLS - 2;
 
 export const CENTER_COL = 4;
 
-/** 大本营块：3×3（上三下三 + 左右各一墙，中间大本营） */
+/** 大本营块：3×3 U 形围墙（顶栏 + 左右柱 + 底角与中门，朝敌营一侧开口） */
 export const PALACE_COL_MIN = 3;
 export const PALACE_COL_MAX = 5;
 
@@ -38,29 +38,47 @@ export const BLUE_SPAWN_MAX_ROW = BLUE_PALACE_ROW_MAX;
 
 export const BASE_WALL_MAX_HP = 150;
 
-function compactPalaceWalls(r0: number, r1: number): { col: number; row: number }[] {
+/**
+ * U 形围墙（如图）：顶栏 — 左柱 — 右柱 — 底角；底边中格为可破坏城门
+ * ```
+ * 墙 墙 墙
+ * 墙 本营 墙
+ * 墙 门 墙
+ * ```
+ */
+function uShapePalaceWalls(
+  rowMin: number,
+  rowMax: number,
+  gateCol: number
+): { col: number; row: number }[] {
   const c0 = PALACE_COL_MIN;
   const c1 = PALACE_COL_MAX;
   const cells: { col: number; row: number }[] = [];
+
   for (let c = c0; c <= c1; c++) {
-    cells.push({ col: c, row: r0 });
-    cells.push({ col: c, row: r1 });
+    cells.push({ col: c, row: rowMin });
   }
-  for (let r = r0 + 1; r < r1; r++) {
+
+  for (let r = rowMin + 1; r <= rowMax; r++) {
     cells.push({ col: c0, row: r });
     cells.push({ col: c1, row: r });
   }
+
+  cells.push({ col: gateCol, row: rowMax });
+
   return cells;
 }
 
-export const BLUE_BASE_WALL_CELLS = compactPalaceWalls(
+export const BLUE_BASE_WALL_CELLS = uShapePalaceWalls(
   BLUE_PALACE_ROW_MIN,
-  BLUE_PALACE_ROW_MAX
+  BLUE_PALACE_ROW_MAX,
+  CENTER_COL
 ) as readonly { col: number; row: number }[];
 
-export const RED_BASE_WALL_CELLS = compactPalaceWalls(
+export const RED_BASE_WALL_CELLS = uShapePalaceWalls(
   RED_PALACE_ROW_MIN,
-  RED_PALACE_ROW_MAX
+  RED_PALACE_ROW_MAX,
+  CENTER_COL
 ) as readonly { col: number; row: number }[];
 
 const ALL_BASE_WALL_SET = new Set(
@@ -120,16 +138,98 @@ export function isRiverRow(row: number): boolean {
   return (RIVER_ROWS as readonly number[]).includes(row);
 }
 
-export function canAttackEnemyBase(
+/** 城门已破：中门或任一侧翼墙被拆即可从两侧涌入 */
+function isEnemyGateBreached(
+  unitSide: Side,
+  gateWallIntact: (col: number, row: number) => boolean
+): boolean {
+  const gate = unitSide === "red" ? BLUE_BASE_GATE : RED_BASE_GATE;
+  if (!gateWallIntact(gate.col, gate.row)) return true;
+  if (!gateWallIntact(PALACE_COL_MIN, gate.row)) return true;
+  if (!gateWallIntact(PALACE_COL_MAX, gate.row)) return true;
+  return false;
+}
+
+function isBlockingPalaceWall(
+  col: number,
+  row: number,
+  gateWallIntact: (col: number, row: number) => boolean
+): boolean {
+  return isBaseWallPosition(col, row) && gateWallIntact(col, row);
+}
+
+/** L 形路径上是否没有完好的大本营围墙（横走 / 竖走至少一条通畅） */
+function hasClearPathToBase(
   unitCol: number,
   unitRow: number,
   unitSide: Side,
   gateWallIntact: (col: number, row: number) => boolean
 ): boolean {
-  if (unitSide === "red") {
-    const g = BLUE_BASE_GATE;
-    return unitCol === g.col && unitRow === g.row && !gateWallIntact(g.col, g.row);
-  }
-  const g = RED_BASE_GATE;
-  return unitCol === g.col && unitRow === g.row && !gateWallIntact(g.col, g.row);
+  const base = unitSide === "red" ? BLUE_BASE : RED_BASE;
+
+  const pathClear = (horizontalFirst: boolean): boolean => {
+    const cells: { col: number; row: number }[] = [];
+    if (horizontalFirst) {
+      let c = unitCol;
+      const stepC = Math.sign(base.col - unitCol);
+      while (c !== base.col) {
+        c += stepC;
+        cells.push({ col: c, row: unitRow });
+      }
+      let r = unitRow;
+      const stepR = Math.sign(base.row - unitRow);
+      while (r !== base.row) {
+        r += stepR;
+        cells.push({ col: base.col, row: r });
+      }
+    } else {
+      let r = unitRow;
+      const stepR = Math.sign(base.row - unitRow);
+      while (r !== base.row) {
+        r += stepR;
+        cells.push({ col: unitCol, row: r });
+      }
+      let c = unitCol;
+      const stepC = Math.sign(base.col - unitCol);
+      while (c !== base.col) {
+        c += stepC;
+        cells.push({ col: c, row: base.row });
+      }
+    }
+    return !cells.some(({ col, row }) => isBlockingPalaceWall(col, row, gateWallIntact));
+  };
+
+  return pathClear(true) || pathClear(false);
+}
+
+export function canAttackEnemyBase(
+  unitCol: number,
+  unitRow: number,
+  unitSide: Side,
+  attackRange: number,
+  gateWallIntact: (col: number, row: number) => boolean
+): boolean {
+  const base = unitSide === "red" ? BLUE_BASE : RED_BASE;
+  const gate = unitSide === "red" ? BLUE_BASE_GATE : RED_BASE_GATE;
+  if (!isEnemyGateBreached(unitSide, gateWallIntact)) return false;
+
+  const distToBase = Math.abs(unitCol - base.col) + Math.abs(unitRow - base.row);
+  if (distToBase < 1) return false;
+
+  const onBattlefieldSide =
+    unitSide === "red" ? unitRow >= gate.row : unitRow <= gate.row;
+  if (!onBattlefieldSide) return false;
+
+  if (!hasClearPathToBase(unitCol, unitRow, unitSide, gateWallIntact)) return false;
+
+  // 城门行 / 门外前一排：仅宫殿列（3–5）可围攻，且路径上不能有墙
+  const approachRow = unitSide === "red" ? gate.row + 1 : gate.row - 1;
+  const onPalaceSiegeRow =
+    unitCol >= PALACE_COL_MIN &&
+    unitCol <= PALACE_COL_MAX &&
+    (unitRow === gate.row || unitRow === approachRow);
+
+  if (onPalaceSiegeRow) return true;
+
+  return distToBase <= attackRange;
 }

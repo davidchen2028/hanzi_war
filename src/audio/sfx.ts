@@ -76,3 +76,39 @@ export function playCloudArrowSfx(): void {
   hit.start(now + 0.12);
   hit.stop(now + 0.5);
 }
+
+/** 破釜沉舟：短促战鼓冲击 */
+export function playBurnBoatsSfx(): void {
+  const ctx = getAudioContext();
+  if (!ctx) return;
+
+  const now = ctx.currentTime;
+
+  const drum = ctx.createOscillator();
+  drum.type = "sine";
+  drum.frequency.setValueAtTime(120, now);
+  drum.frequency.exponentialRampToValueAtTime(55, now + 0.35);
+
+  const drumGain = ctx.createGain();
+  drumGain.gain.setValueAtTime(0.45, now);
+  drumGain.gain.exponentialRampToValueAtTime(0.01, now + 0.38);
+
+  drum.connect(drumGain);
+  drumGain.connect(ctx.destination);
+  drum.start(now);
+  drum.stop(now + 0.38);
+
+  const clash = ctx.createOscillator();
+  clash.type = "square";
+  clash.frequency.setValueAtTime(280, now + 0.05);
+  clash.frequency.exponentialRampToValueAtTime(140, now + 0.25);
+
+  const clashGain = ctx.createGain();
+  clashGain.gain.setValueAtTime(0.12, now + 0.05);
+  clashGain.gain.exponentialRampToValueAtTime(0.01, now + 0.28);
+
+  clash.connect(clashGain);
+  clashGain.connect(ctx.destination);
+  clash.start(now + 0.05);
+  clash.stop(now + 0.28);
+}
